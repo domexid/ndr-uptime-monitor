@@ -20,7 +20,7 @@ jobs:
       # Restore the previous up/down state so we only alert on CHANGES
       # (down → alert once, recovered → alert once). No spam every 5 min.
       - name: Restore previous state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: state.json
           key: ndr-uptime-state-${{ github.run_id }}
@@ -121,7 +121,7 @@ jobs:
 
       - name: Save state for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: state.json
           key: ndr-uptime-state-${{ github.run_id }}
