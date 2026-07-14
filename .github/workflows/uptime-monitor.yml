@@ -1,0 +1,127 @@
+name: NDR Uptime Monitor
+
+# Runs on GitHub's servers (external to the NDR VPS), so it keeps working
+# even when the VPS is completely down — which is exactly when we need it.
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (UTC). GitHub may delay a few min under load.
+  workflow_dispatch:         # allows manual "Run workflow" from the Actions tab
+
+concurrency:
+  group: uptime-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # Restore the previous up/down state so we only alert on CHANGES
+      # (down → alert once, recovered → alert once). No spam every 5 min.
+      - name: Restore previous state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: ndr-uptime-state-${{ github.run_id }}
+          restore-keys: |
+            ndr-uptime-state-
+
+      - name: Check endpoints and alert on state change
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          from datetime import datetime, timezone, timedelta
+
+          WIB = timezone(timedelta(hours=7))
+          WEBHOOK = os.environ['SLACK_WEBHOOK']
+
+          ENDPOINTS = [
+              ("Absensi (Attendance)", "https://absensi.naturedradiance.com"),
+              ("Main Dashboard",       "https://dashboard.naturedradiance.com"),
+              ("Finance",              "https://finance.naturedradiance.com"),
+              ("HRD",                  "https://hrd.naturedradiance.com"),
+              ("Staff Dashboard",      "https://staff.naturedradiance.com"),
+          ]
+
+          def probe(url, attempts=2):
+              """Return (is_up, detail). Retries once to avoid false alarms."""
+              last = ""
+              for i in range(attempts):
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": "NDR-UptimeMonitor/1.0"})
+                      with urllib.request.urlopen(req, timeout=20) as r:
+                          if 200 <= r.status < 400:
+                              return True, f"HTTP {r.status}"
+                          last = f"HTTP {r.status}"
+                  except urllib.error.HTTPError as e:
+                      # 401/403 still means the server is ALIVE (auth-gated) → treat as up
+                      if e.code in (401, 403):
+                          return True, f"HTTP {e.code} (auth-gated, server alive)"
+                      last = f"HTTP {e.code}"
+                  except Exception as e:
+                      last = type(e).__name__
+                  if i < attempts - 1:
+                      time.sleep(5)   # brief pause before retry
+              return False, last
+
+          # Load previous state (default: everything was up)
+          try:
+              with open("state.json") as f:
+                  prev = json.load(f)
+          except Exception:
+              prev = {}
+
+          now_str = datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
+          new_state, down_now, recovered = {}, [], []
+
+          for name, url in ENDPOINTS:
+              up, detail = probe(url)
+              new_state[name] = {"up": up, "detail": detail}
+              was_up = prev.get(name, {}).get("up", True)
+              if not up and was_up:
+                  down_now.append((name, url, detail))
+              elif up and not was_up:
+                  recovered.append((name, url))
+              print(f"{'UP  ' if up else 'DOWN'}  {name:22s} {detail}")
+
+          def slack(text):
+              body = json.dumps({"text": text}).encode()
+              req = urllib.request.Request(WEBHOOK, data=body,
+                                           headers={"Content-Type": "application/json"})
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("  → Slack alert sent")
+              except Exception as e:
+                  print(f"  → Slack post FAILED: {e}")
+
+          if down_now:
+              lines = [f":rotating_light: *NDR SYSTEM DOWN* — {now_str}", ""]
+              for name, url, detail in down_now:
+                  lines.append(f"• *{name}* tidak bisa diakses ({detail})\n  {url}")
+              lines.append("")
+              lines.append("_Terdeteksi dari luar server (GitHub Actions), jadi ini bukan false alarm. "
+                           "Kemungkinan server/VPS down. Cek Hostinger._")
+              slack("\n".join(lines))
+
+          if recovered:
+              lines = [f":white_check_mark: *NDR SYSTEM PULIH* — {now_str}", ""]
+              for name, url in recovered:
+                  lines.append(f"• *{name}* sudah normal kembali")
+              slack("\n".join(lines))
+
+          if not down_now and not recovered:
+              print("All healthy, no state change — staying silent.")
+
+          with open("state.json", "w") as f:
+              json.dump(new_state, f, indent=2)
+          PY
+
+      - name: Save state for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: ndr-uptime-state-${{ github.run_id }}
