@@ -1,0 +1,29 @@
+name: Keepalive
+
+# GitHub automatically DISABLES scheduled workflows after 60 days of repository
+# inactivity — and workflow runs themselves do NOT count as activity.
+# Without this, your uptime monitoring would silently stop after ~2 months.
+# This makes a tiny commit weekly to keep the repo "active".
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'    # every Monday 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Touch heartbeat file and commit
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+          git config user.name  "ndr-uptime-bot"
+          git config user.email "actions@github.com"
+          git add .keepalive
+          git diff --staged --quiet || git commit -m "chore: keepalive $(date -u +%F)"
+          git push
